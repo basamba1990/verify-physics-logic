@@ -1,0 +1,49 @@
+services:
+  - type: web
+    name: spotbulle-h2-inference
+    env: python
+    region: frankfurt
+    plan: free
+    
+    # Build configuration
+    buildCommand: pip install --no-cache-dir -r python/requirements.txt
+    startCommand: python python/hydrogen_api.py
+    
+    # Port
+    envVars:
+      - key: PORT
+        value: 8000
+      - key: OPENAI_API_KEY
+        scope: build,runtime
+      - key: ENVIRONMENT
+        value: production
+      - key: LOG_LEVEL
+        value: info
+      - key: PYTHONUNBUFFERED
+        value: "1"
+    
+    # Health check
+    healthCheckPath: /health
+    healthCheckInterval: 30
+    healthCheckTimeout: 10
+    
+    # Auto-deploy
+    autoDeploy: true
+    
+    # Scaling
+    numInstances: 1
+    
+    # Disk
+    disk:
+      name: model-cache
+      mountPath: /app/models
+      sizeGB: 10
+    
+    # Timeout
+    buildTimeout: 600
+    deployTimeout: 600
+    
+    # Notifications
+    notifications:
+      email: true
+      webhook: false
