@@ -1,0 +1,38 @@
+version: '3.8'
+
+services:
+  # Next.js Frontend
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+    ports:
+      - "3000:3000"
+    environment:
+      - NEXT_PUBLIC_SUPABASE_URL=${NEXT_PUBLIC_SUPABASE_URL}
+      - NEXT_PUBLIC_SUPABASE_ANON_KEY=${NEXT_PUBLIC_SUPABASE_ANON_KEY}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - H2_INFERENCE_API_URL=http://h2-api:8000
+    depends_on:
+      - h2-api
+    networks:
+      - spotbulle-network
+
+  # Python H2-Inference API
+  h2-api:
+    build:
+      context: ./python
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./python/models:/app/models
+      - ./python/results:/app/results
+    networks:
+      - spotbulle-network
+    environment:
+      - PYTHONUNBUFFERED=1
+
+networks:
+  spotbulle-network:
+    driver: bridge
