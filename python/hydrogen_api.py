@@ -1,15 +1,28 @@
 """
 FastAPI server for Hydrogen PINN Model
 Provides REST endpoints for training and inference
+Fixed for Render deployment with proper module imports
 """
 
+import sys
+import os
+from pathlib import Path
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List, Dict, Optional
 import torch
-import os
 from datetime import datetime
+import uvicorn
+
+# ============================================================================
+# FIX FOR RENDER: Add current directory to Python path
+# This ensures that local modules can be imported correctly
+# ============================================================================
+current_dir = Path(__file__).parent
+sys.path.insert(0, str(current_dir))
+
+# Now import local modules
 from hydrogen_pinn_model import (
     HydrogenPINN,
     train_pinn,
@@ -24,10 +37,14 @@ app = FastAPI(
     version="1.0.0",
 )
 
-# CORS middleware
+# CORS middleware - Allow requests from Vercel frontend
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[
+        "https://spotbulle-science-verify.vercel.app",
+        "http://localhost:3000",
+        "*",  # Allow all origins (can be restricted later)
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -40,12 +57,17 @@ models_dir = "models"
 os.makedirs(models_dir, exist_ok=True)
 
 
-# Pydantic models
+# ============================================================================
+# Pydantic Models (Request/Response schemas)
+# ============================================================================
+
 class InitializeRequest(BaseModel):
+    """Request to initialize a new PINN model"""
     layers: List[int] = [2, 64, 64, 64, 3]
 
 
 class TrainRequest(BaseModel):
+    """Request to train the PINN model"""
     N_pde: int = 5000
     N_ic: int = 500
     N_bc: int = 500
@@ -55,19 +77,23 @@ class TrainRequest(BaseModel):
 
 
 class LoadRequest(BaseModel):
+    """Request to load a pre-trained model"""
     model_path: str
 
 
 class PredictionRequest(BaseModel):
+    """Request for a single prediction"""
     time: float
     position: float
 
 
 class BatchPredictionRequest(BaseModel):
+    """Request for batch predictions"""
     batch: List[PredictionRequest]
 
 
 class PredictionResponse(BaseModel):
+    """Response with prediction results"""
     pressure: float
     velocity: float
     temperature: float
@@ -77,39 +103,72 @@ class PredictionResponse(BaseModel):
 
 
 class ModelStatusResponse(BaseModel):
+    """Response with model status"""
     model_loaded: bool
     model_name: Optional[str]
     device: str
     timestamp: str
 
 
-# Endpoints
+# ============================================================================
+# Health Check Endpoint
+# ============================================================================
+
 @app.get("/health")
 async def health_check():
-    """Health check endpoint"""
-    return {"status": "ok", "timestamp": datetime.utcnow().isoformat()}
+    """
+    Health check endpoint
+    Returns: {"status": "healthy", "timestamp": "..."}
+    """
+    return {
+        "status": "healthy",
+        "timestamp": datetime.utcnow().isoformat(),
+        "service": "H2-Inference API",
+        "version": "1.0.0"
+    }
 
+
+# ============================================================================
+# Model Management Endpoints
+# ============================================================================
 
 @app.post("/model/initialize")
 async def initialize_model(request: InitializeRequest):
-    """Initialize a new PINN model"""
+    """
+    Initialize a new PINN model with specified architecture
+    
+    Args:
+        request: InitializeRequest with layers configuration
+    
+    Returns:
+        {"status": "success", "message": "...", "layers": [...], "device": "..."}
+    """
     global current_model
     try:
         current_model = HydrogenPINN(layers=request.layers)
         models["default"] = current_model
         return {
             "status": "success",
-            "message": "Model initialized",
+            "message": "Model initialized successfully",
             "layers": request.layers,
             "device": "cuda" if torch.cuda.is_available() else "cpu",
+            "timestamp": datetime.utcnow().isoformat(),
         }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=f"Initialization error: {str(e)}")
 
 
 @app.post("/model/train")
 async def train_model(request: TrainRequest):
-    """Train the PINN model"""
+    """
+    Train the PINN model on physics-informed data
+    
+    Args:
+        request: TrainRequest with training parameters
+    
+    Returns:
+        {"status": "success", "message": "...", "model_name": "...", "final_loss": ...}
+    """
     global current_model
     try:
         if current_model is None:
@@ -131,19 +190,28 @@ async def train_model(request: TrainRequest):
 
         return {
             "status": "success",
-            "message": "Training completed",
+            "message": "Training completed successfully",
             "model_name": request.model_name,
             "model_path": model_path,
-            "final_loss": history["loss"][-1],
+            "final_loss": float(history["loss"][-1]),
             "epochs": request.epochs,
+            "timestamp": datetime.utcnow().isoformat(),
         }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=f"Training error: {str(e)}")
 
 
 @app.post("/model/load")
 async def load_model(request: LoadRequest):
-    """Load a pre-trained model"""
+    """
+    Load a pre-trained model from file
+    
+    Args:
+        request: LoadRequest with model_path
+    
+    Returns:
+        {"status": "success", "message": "...", "model_path": "...", "model_name": "..."}
+    """
     global current_model
     try:
         if not os.path.exists(request.model_path):
@@ -156,17 +224,63 @@ async def load_model(request: LoadRequest):
 
         return {
             "status": "success",
-            "message": "Model loaded",
+            "message": "Model loaded successfully",
             "model_path": request.model_path,
             "model_name": model_name,
+            "timestamp": datetime.utcnow().isoformat(),
         }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=f"Load error: {str(e)}")
 
+
+@app.get("/model/status", response_model=ModelStatusResponse)
+async def model_status():
+    """
+    Get current model status
+    
+    Returns:
+        ModelStatusResponse with model information
+    """
+    global current_model
+    return ModelStatusResponse(
+        model_loaded=current_model is not None,
+        model_name="default" if current_model else None,
+        device="cuda" if torch.cuda.is_available() else "cpu",
+        timestamp=datetime.utcnow().isoformat(),
+    )
+
+
+@app.get("/models/list")
+async def list_models():
+    """
+    List all available models
+    
+    Returns:
+        {"status": "success", "models": [...], "current_model": "..."}
+    """
+    return {
+        "status": "success",
+        "models": list(models.keys()),
+        "current_model": "default" if current_model else None,
+        "timestamp": datetime.utcnow().isoformat(),
+    }
+
+
+# ============================================================================
+# Prediction Endpoints
+# ============================================================================
 
 @app.post("/predict", response_model=PredictionResponse)
 async def predict(request: PredictionRequest):
-    """Make a single prediction"""
+    """
+    Make a single prediction using the current model
+    
+    Args:
+        request: PredictionRequest with time and position
+    
+    Returns:
+        PredictionResponse with pressure, velocity, temperature
+    """
     global current_model
     try:
         if current_model is None:
@@ -178,16 +292,27 @@ async def predict(request: PredictionRequest):
             timestamp=datetime.utcnow().isoformat(),
         )
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=f"Prediction error: {str(e)}")
 
 
 @app.post("/predict/batch")
 async def predict_batch(request: BatchPredictionRequest):
-    """Make batch predictions"""
+    """
+    Make batch predictions (up to 100 points)
+    
+    Args:
+        request: BatchPredictionRequest with list of predictions
+    
+    Returns:
+        {"status": "success", "count": N, "predictions": [...]}
+    """
     global current_model
     try:
         if current_model is None:
             raise ValueError("No model loaded. Initialize or load a model first.")
+
+        if len(request.batch) > 100:
+            raise ValueError("Batch size limited to 100 predictions")
 
         results = []
         for pred_req in request.batch:
@@ -205,34 +330,34 @@ async def predict_batch(request: BatchPredictionRequest):
             "status": "success",
             "count": len(results),
             "predictions": results,
+            "timestamp": datetime.utcnow().isoformat(),
         }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=f"Batch prediction error: {str(e)}")
 
 
-@app.get("/model/status", response_model=ModelStatusResponse)
-async def model_status():
-    """Get current model status"""
-    global current_model
-    return ModelStatusResponse(
-        model_loaded=current_model is not None,
-        model_name="default" if current_model else None,
-        device="cuda" if torch.cuda.is_available() else "cpu",
-        timestamp=datetime.utcnow().isoformat(),
-    )
-
-
-@app.get("/models/list")
-async def list_models():
-    """List all available models"""
-    return {
-        "status": "success",
-        "models": list(models.keys()),
-        "current_model": "default" if current_model else None,
-    }
-
+# ============================================================================
+# Main Entry Point
+# ============================================================================
 
 if __name__ == "__main__":
-    import uvicorn
-
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    # Get port from environment variable (Render sets this)
+    port = int(os.getenv("PORT", 8000))
+    
+    # Get host from environment variable (default to 0.0.0.0 for external access)
+    host = os.getenv("HOST", "0.0.0.0")
+    
+    # Get reload setting from environment (disable in production)
+    reload = os.getenv("RELOAD", "false").lower() == "true"
+    
+    print(f"Starting H2-Inference API on {host}:{port}")
+    print(f"Swagger UI: http://{host}:{port}/docs")
+    print(f"ReDoc: http://{host}:{port}/redoc")
+    
+    uvicorn.run(
+        app,
+        host=host,
+        port=port,
+        reload=reload,
+        log_level="info",
+    )
